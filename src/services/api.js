@@ -1,13 +1,120 @@
 /**
- * Serviço de integração com a API pública publica.cnpj.ws
- * Inclui suporte a timeout, retry, cache automático e mensagens amigáveis
+ * Serviço de integração para consulta de CNPJ com redundância de provedores:
+ * 1. Provedor Primário: publica.cnpj.ws (consulta direta ou proxy local)
+ * 2. Provedor Secundário (Fallback Resiliente): minhareceita.org (Open source, sem cota de 3 req/min)
+ * Inclui suporte a timeout, cache automático, adaptação de esquemas e mensagens amigáveis
  */
 
-import { cacheService } from './cacheService';
-import { SAMPLE_BANCO_DO_BRASIL, SAMPLE_PETROBRAS } from '../types/cnpj';
+import { cacheService } from './cacheService.js';
+import { SAMPLE_BANCO_DO_BRASIL, SAMPLE_PETROBRAS } from '../types/cnpj.js';
 
 const TIMEOUT_MS = 12000;
-const MAX_RETRIES = 1;
+
+/**
+ * Normaliza os dados do Minha Receita para o esquema padrão do sistema (baseado no cnpj.ws)
+ */
+function adaptMinhaReceita(raw) {
+  const cleanCnpj = String(raw.cnpj || '').replace(/\D/g, '');
+  const cnpjRaiz = cleanCnpj.slice(0, 8);
+  const cnpjOrdem = cleanCnpj.slice(8, 12);
+  const cnpjDv = cleanCnpj.slice(12, 14);
+
+  // Formata o telefone
+  const rawPhone = raw.ddd_telefone_1 ? String(raw.ddd_telefone_1).replace(/\D/g, '') : '';
+  const ddd1 = rawPhone.length >= 10 ? rawPhone.slice(0, 2) : '';
+  const telefone1 = rawPhone.length >= 10 ? rawPhone.slice(2) : rawPhone;
+
+  return {
+    cnpj_raiz: cnpjRaiz,
+    razao_social: raw.razao_social || 'Razão Social não informada',
+    capital_social: String(raw.capital_social || '0.00'),
+    responsavel_federativo: raw.ente_federativo_responsavel || '',
+    atualizado_em: raw.data_situacao_cadastral ? `${raw.data_situacao_cadastral}T00:00:00.000Z` : new Date().toISOString(),
+    porte: {
+      id: String(raw.codigo_porte || ''),
+      descricao: raw.porte || 'Não informado'
+    },
+    natureza_juridica: {
+      id: String(raw.codigo_natureza_juridica || ''),
+      descricao: raw.natureza_juridica || 'Não informada'
+    },
+    qualificacao_do_responsavel: {
+      id: raw.qualificacao_do_responsavel || 0,
+      descricao: String(raw.qualificacao_do_responsavel || 'Sócio-Administrador')
+    },
+    socios: (raw.qsa || []).map(s => ({
+      cpf_cnpj_socio: s.cnpj_cpf_do_socio || '',
+      nome: s.nome_socio || '',
+      tipo: s.identificador_de_socio === 1 ? 'Pessoa Jurídica' : 'Pessoa Física',
+      data_entrada: s.data_entrada_sociedade || '',
+      cpf_representante_legal: s.cpf_representante_legal || '',
+      nome_representante: s.nome_representante_legal || null,
+      faixa_etaria: s.faixa_etaria || '',
+      qualificacao_socio: {
+        id: s.codigo_qualificacao_socio || 0,
+        descricao: s.qualificacao_socio || 'Sócio'
+      },
+      pais: {
+        nome: s.pais || 'Brasil'
+      }
+    })),
+    simples: {
+      simples: raw.opcao_pelo_simples ? 'Sim' : 'Não',
+      mei: raw.opcao_pelo_mei ? 'Sim' : 'Não',
+      data_opcao_simples: raw.data_opcao_pelo_simples || null,
+      data_exclusao_simples: raw.data_exclusao_do_simples || null,
+      data_opcao_mei: raw.data_opcao_pelo_mei || null,
+      data_exclusao_mei: raw.data_exclusao_do_mei || null
+    },
+    estabelecimento: {
+      cnpj: cleanCnpj,
+      cnpj_raiz: cnpjRaiz,
+      cnpj_ordem: cnpjOrdem,
+      cnpj_digito_verificador: cnpjDv,
+      tipo: raw.descricao_identificador_matriz_filial
+        ? raw.descricao_identificador_matriz_filial.charAt(0).toUpperCase() + raw.descricao_identificador_matriz_filial.slice(1).toLowerCase()
+        : 'Matriz',
+      nome_fantasia: raw.nome_fantasia || raw.razao_social,
+      situacao_cadastral: raw.descricao_situacao_cadastral
+        ? raw.descricao_situacao_cadastral.charAt(0).toUpperCase() + raw.descricao_situacao_cadastral.slice(1).toLowerCase()
+        : 'Ativa',
+      data_situacao_cadastral: raw.data_situacao_cadastral,
+      data_inicio_atividade: raw.data_inicio_atividade,
+      tipo_logradouro: raw.descricao_tipo_de_logradouro || '',
+      logradouro: raw.logradouro || '',
+      numero: raw.numero || 'S/N',
+      complemento: raw.complemento || '',
+      bairro: raw.bairro || '',
+      cep: raw.cep ? String(raw.cep).replace(/\D/g, '') : '',
+      ddd1,
+      telefone1,
+      email: raw.email || '',
+      situacao_especial: raw.situacao_especial || null,
+      data_situacao_especial: raw.data_situacao_especial || null,
+      atualizado_em: raw.data_situacao_cadastral ? `${raw.data_situacao_cadastral}T00:00:00.000Z` : new Date().toISOString(),
+      atividade_principal: {
+        id: String(raw.cnae_fiscal || ''),
+        descricao: raw.cnae_fiscal_descricao || 'Atividade principal não informada'
+      },
+      atividades_secundarias: (raw.cnaes_secundarios || []).map(c => ({
+        id: String(c.codigo),
+        descricao: c.descricao
+      })),
+      pais: {
+        nome: raw.pais || 'Brasil'
+      },
+      estado: {
+        nome: raw.uf,
+        sigla: raw.uf
+      },
+      cidade: {
+        nome: raw.municipio
+      },
+      motivo_situacao_cadastral: raw.descricao_motivo_situacao_cadastral || null,
+      inscricoes_estaduais: []
+    }
+  };
+}
 
 /**
  * Executa uma requisição com timeout
@@ -30,7 +137,81 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_MS) {
 }
 
 /**
- * Consulta dados do CNPJ na API pública
+ * Consulta na API pública publica.cnpj.ws
+ */
+async function fetchFromCnpjWs(cnpj) {
+  // Tenta primeiro a API direta (que suporta CORS abertamente) e fallback para o proxy local
+  const urls = [
+    `https://publica.cnpj.ws/cnpj/${cnpj}`,
+    `/api-cnpj/${cnpj}`
+  ];
+
+  for (const url of urls) {
+    try {
+      const response = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return { success: true, data, source: 'cnpj.ws' };
+      }
+
+      // Se for 404 no proxy relativo, pode ser apenas que o proxy local não está configurado na build estática
+      // Não aborta prematuramente se for a URL relativa
+      if (response.status === 404 && url.startsWith('/api-cnpj')) {
+        continue;
+      }
+
+      if (response.status === 429) {
+        return { success: false, status: 429, errorTitle: 'Limite de Requisições (429)' };
+      }
+
+      if (response.status === 404) {
+        return { success: false, status: 404, notFound: true };
+      }
+    } catch {
+      // Falha de rede na URL atual, tenta a próxima URL
+      continue;
+    }
+  }
+
+  return { success: false, status: 0, networkError: true };
+}
+
+/**
+ * Consulta na API Minha Receita (espelho de dados abertos da Receita Federal)
+ */
+async function fetchFromMinhaReceita(cnpj) {
+  try {
+    const response = await fetchWithTimeout(`https://minhareceita.org/${cnpj}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+
+    if (response.ok) {
+      const raw = await response.json();
+      const adapted = adaptMinhaReceita(raw);
+      return { success: true, data: adapted, source: 'minhareceita.org' };
+    }
+
+    if (response.status === 404) {
+      return { success: false, status: 404, notFound: true };
+    }
+
+    return { success: false, status: response.status };
+  } catch {
+    return { success: false, status: 0, networkError: true };
+  }
+}
+
+/**
+ * Consulta dados do CNPJ na API pública com fallback resiliente
  * @param {string} rawCnpj - Número do CNPJ (formatado ou limpo)
  * @param {object} options - Opções de busca { forceRefresh: boolean, useCache: boolean }
  */
@@ -62,128 +243,39 @@ export async function fetchCnpj(rawCnpj, options = {}) {
     }
   }
 
-  // 2. Pre-check para dados de demonstração offline se falhar ou para demonstração rápida
+  // Pre-check para dados de demonstração conhecidos
   const isBancoDoBrasil = cnpj === '00000000000191';
   const isPetrobras = cnpj === '33000167000101';
 
-  // 3. Monta URLs candidatas: proxy do vite (/api-cnpj) para evitar CORS no dev, e fallback direto
-  const urls = [
-    `/api-cnpj/${cnpj}`,
-    `https://publica.cnpj.ws/cnpj/${cnpj}`
-  ];
+  // 2. Consulta Provedor 1: publica.cnpj.ws
+  const cnpjWsResult = await fetchFromCnpjWs(cnpj);
 
-  let lastError = null;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    for (const url of urls) {
-      try {
-        const response = await fetchWithTimeout(url, {
-          method: 'GET',
-          headers: {
-            'Accept': 'application/json'
-          }
-        });
-
-        // Caso de Sucesso
-        if (response.ok) {
-          const data = await response.json();
-          // Salva no cache local
-          cacheService.set(cnpj, data);
-          return {
-            success: true,
-            data,
-            fromCache: false
-          };
-        }
-
-        // Tratamento de códigos de erro específicos
-        const errorJson = await response.json().catch(() => null);
-
-        if (response.status === 429) {
-          const detail = errorJson?.detalhes || 'Limite máximo de 3 consultas por minuto atingido.';
-          
-          // Se for demo, podemos servir o dado de demonstração com um aviso amigável
-          if (isBancoDoBrasil) {
-            return {
-              success: true,
-              data: SAMPLE_BANCO_DO_BRASIL,
-              fromCache: false,
-              rateLimitWarning: detail
-            };
-          }
-          if (isPetrobras) {
-            return {
-              success: true,
-              data: SAMPLE_PETROBRAS,
-              fromCache: false,
-              rateLimitWarning: detail
-            };
-          }
-
-          return {
-            success: false,
-            error: {
-              title: 'Limite de Requisições Atingido (429)',
-              message: detail,
-              status: 429,
-              isRateLimit: true
-            }
-          };
-        }
-
-        if (response.status === 404) {
-          return {
-            success: false,
-            error: {
-              title: 'CNPJ Não Encontrado (404)',
-              message: 'Não foram encontrados registros para o CNPJ informado na base da Receita Federal.',
-              status: 404
-            }
-          };
-        }
-
-        if (response.status === 400) {
-          return {
-            success: false,
-            error: {
-              title: 'Requisição Inválida (400)',
-              message: errorJson?.detalhes || 'O formato ou conteúdo do CNPJ é inválido.',
-              status: 400
-            }
-          };
-        }
-
-        if (response.status >= 500) {
-          lastError = {
-            title: 'Serviço Indisponível (5xx)',
-            message: 'O servidor da API pública de CNPJ está temporariamente instável. Tente novamente em instantes.',
-            status: response.status
-          };
-        }
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          lastError = {
-            title: 'Tempo Limite Excedido (Timeout)',
-            message: 'O servidor demorou mais de 12 segundos para responder. Verifique sua conexão ou tente novamente.',
-            status: 408
-          };
-        } else {
-          lastError = {
-            title: 'Falha de Conexão',
-            message: err.message || 'Não foi possível conectar ao servidor de consulta de CNPJ.',
-            status: 0
-          };
-        }
-      }
-    }
-
-    // Se houve erro e ainda restam tentativas, aguarda antes da próxima
-    if (attempt < MAX_RETRIES) {
-      await new Promise(res => setTimeout(res, 1200));
-    }
+  if (cnpjWsResult.success) {
+    cacheService.set(cnpj, cnpjWsResult.data);
+    return {
+      success: true,
+      data: cnpjWsResult.data,
+      fromCache: false
+    };
   }
 
-  // Fallback gracioso para dados de demonstração conhecidos caso a rede falhe
+  // 3. Fallback Provedor 2: minhareceita.org
+  // Acionado caso o cnpj.ws tenha retornado 429 (rate limit), 404 (base desatualizada) ou erro de rede/servidor
+  const fallbackResult = await fetchFromMinhaReceita(cnpj);
+
+  if (fallbackResult.success) {
+    cacheService.set(cnpj, fallbackResult.data);
+    return {
+      success: true,
+      data: fallbackResult.data,
+      fromCache: false,
+      rateLimitWarning: cnpjWsResult.status === 429
+        ? 'Limite da API principal atingido. Dados obtidos com sucesso através do provedor secundário (Minha Receita).'
+        : null
+    };
+  }
+
+  // 4. Fallback para demonstrações conhecidas caso a rede esteja indisponível
   if (isBancoDoBrasil) {
     return {
       success: true,
@@ -201,12 +293,39 @@ export async function fetchCnpj(rawCnpj, options = {}) {
     };
   }
 
+  // 5. Se ambos retornaram 404, o CNPJ realmente não está disponível nas bases de Dados Abertos
+  if (cnpjWsResult.notFound || fallbackResult.notFound) {
+    return {
+      success: false,
+      error: {
+        title: 'CNPJ Não Encontrado (404)',
+        message: 'O CNPJ informado não foi localizado nas bases públicas de dados abertos. Empresas recém-abertas ou com alterações recentes podem levar algumas semanas para serem sincronizadas pelos espelhos públicos da Receita Federal.',
+        status: 404,
+        receitaUrl: 'https://solucoes.receita.fazenda.gov.br/Servicos/cnpjreva/Cnpjreva_Solicitacao.asp'
+      }
+    };
+  }
+
+  // 6. Caso tenha sido bloqueado por rate limit e o fallback também falhou
+  if (cnpjWsResult.status === 429) {
+    return {
+      success: false,
+      error: {
+        title: 'Limite de Requisições Atingido (429)',
+        message: 'O limite de consultas por minuto foi atingido. Aguarde alguns segundos e tente novamente.',
+        status: 429,
+        isRateLimit: true
+      }
+    };
+  }
+
+  // 7. Erro genérico de conexão/instabilidade
   return {
     success: false,
-    error: lastError || {
-      title: 'Erro na Consulta',
-      message: 'Não foi possível obter os dados do CNPJ.',
-      status: 500
+    error: {
+      title: 'Serviço Temporariamente Indisponível',
+      message: 'Não foi possível conectar aos servidores de consulta pública de CNPJ. Verifique sua conexão à internet e tente novamente.',
+      status: 503
     }
   };
 }

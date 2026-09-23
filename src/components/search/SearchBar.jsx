@@ -146,6 +146,19 @@ export function SearchBar({
             <div>
               <h4 className="font-semibold text-sm text-rose-900 dark:text-rose-100">{error.title}</h4>
               <p className="text-sm mt-0.5 text-rose-700 dark:text-rose-300">{error.message}</p>
+              {error.receitaUrl && (
+                <div className="mt-2.5">
+                  <a
+                    href={error.receitaUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-rose-800 dark:text-rose-200 hover:text-rose-950 dark:hover:text-white underline"
+                  >
+                    <span>Consultar comprovante no portal da Receita Federal</span>
+                    <span aria-hidden="true">&rarr;</span>
+                  </a>
+                </div>
+              )}
             </div>
           </div>
           {onRefresh && (

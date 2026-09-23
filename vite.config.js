@@ -15,5 +15,16 @@ export default defineConfig({
         secure: true,
       }
     }
+  },
+  preview: {
+    port: 3000,
+    proxy: {
+      '/api-cnpj': {
+        target: 'https://publica.cnpj.ws/cnpj',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api-cnpj/, ''),
+        secure: true,
+      }
+    }
   }
 })
